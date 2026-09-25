@@ -569,8 +569,8 @@ class TestDecomposeEssentialMatrixNoSVD(BaseTester):
             epi.essential_from_Rt(R1_1, t_1, R2_1, -t_1), epi.essential_from_Rt(R1, t, R2, -t), rtol=1e-3, atol=1e-3
         )
 
-    @pytest.mark.xfail(reason="skip the tests where there are no solutions.")
     def test_consistency(self, device, dtype):
+        _skip_half(dtype, _NO_HALF_LU.format("decompose_essential_matrix"))
         scene = generate_two_view_random_scene(device, dtype)
 
         R1, t1 = scene["R1"], scene["t1"]
@@ -998,21 +998,30 @@ class TestConventionEssential(BaseTester):
         self.assert_close(R_one, R, rtol=1e-4, atol=1e-4)
         self.assert_close(t_one, t_unit, rtol=1e-4, atol=1e-4)
 
-    def test_wart_decompose_no_svd_batch_non_rotations_4880(self, device, dtype):
-        two_view = two_view_scene(device, dtype)
-        # #4880: the rotation normaliser sums over the whole batch, so a batch of two copies of E returns non-rotations,
-        # while the same E alone returns rotations.
-        E = _gt_essential(two_view)
-        eye = torch.eye(3, device=device, dtype=torch.float32)
+    @pytest.mark.parametrize("batch_shape", [(), (1,), (2,), (3,), (2, 1), (3, 2, 1)])
+    @pytest.mark.parametrize("vary_scale", [False, True])
+    def test_convention_decompose_no_svd_batch_rotations_4880(self, batch_shape, vary_scale, device, dtype):
+        # #4880: each matrix must be normalised independently, including across flattened leading dimensions.
+        # E = [t]_x R, with t = (1, 2, 2) and R = [[0, -1, 0], [0, 0, -1], [1, 0, 0]].
+        # Integer entries avoid introducing rotation-conversion error in half precision.
+        E = torch.tensor([[[-2.0, 0.0, -2.0], [1.0, 2.0, 0.0], [0.0, -2.0, 1.0]]], device=device, dtype=dtype)
+        E_batch = E.expand(batch_shape + (3, 3)).clone() if batch_shape else E[0].clone()
+        if vary_scale:
+            scales = torch.arange(1, E_batch.numel() // 9 + 1, device=device, dtype=dtype)
+            E_batch = E_batch * scales.reshape(batch_shape + (1, 1))
 
-        def orthogonality_error(Rm):
-            Rm = Rm.float()
-            return (Rm @ Rm.transpose(-2, -1) - eye).norm(dim=(-2, -1))
+        single = epi.decompose_essential_matrix_no_svd(E)
+        batched = epi.decompose_essential_matrix_no_svd(E_batch)
+        batch_size = E_batch.numel() // 9
+        for actual, expected in zip(batched, single):
+            self.assert_close(actual, expected.expand(batch_size, *expected.shape[1:]))
 
-        R1, R2, _ = epi.decompose_essential_matrix_no_svd(E)
-        assert orthogonality_error(R1).max() < 0.25 and orthogonality_error(R2).max() < 0.25
-        R1b, R2b, _ = epi.decompose_essential_matrix_no_svd(torch.cat([E, E]))
-        assert (orthogonality_error(R1b) > 1.0).all() and (orthogonality_error(R2b) > 1.0).all()
+        eye = torch.eye(3, device=device, dtype=dtype).expand(batch_size, 3, 3)
+        for rotation in batched[:2]:
+            self.assert_close(rotation @ rotation.transpose(-1, -2), eye)
+            # CPU determinant does not support half precision.
+            det = torch.linalg.det(rotation.to(torch.float64 if dtype == torch.float64 else torch.float32))
+            self.assert_close(det.to(dtype), torch.ones(batch_size, device=device, dtype=dtype))
 
     def test_wart_choose_solution_batched_uses_element0_index_2198(self, device, dtype):
         two_view = two_view_scene(device, dtype)
