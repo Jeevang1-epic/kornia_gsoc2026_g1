@@ -1,0 +1,1 @@
+`Canny` and `canny` now emit a specific `TracerWarning` when tracing with `hysteresis=True`, including legacy TorchScript ONNX export. The iteration count is still specialized to the trace example and may produce incorrect results on other inputs; this limitation is now documented. Eager execution, `torch.export`, Dynamo ONNX, and `hysteresis=False` are unchanged.

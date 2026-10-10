@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 
 import torch
 import torch.nn.functional as F
@@ -107,6 +108,9 @@ def canny(
           nothing changes, and returns edges of 0 and 1. Under ``torch.export`` the loop is a ``torch.while_loop``,
           so the exported graph also repeats until nothing changes, for any input; the dynamo ONNX exporter writes
           it as an ONNX ``Loop`` from torch 2.11 and cannot export it before.
+        - With ``hysteresis=True``, ``torch.jit.trace`` and the legacy TorchScript ONNX exporter instead unroll the
+          Python loop to the trace example's iteration count. A ``TracerWarning`` is emitted because the traced
+          model may produce incorrect results on other inputs. ``hysteresis=False`` is unaffected by this limitation.
         - Known defect: an integer input is not converted to a floating dtype. With the default blur a 1-channel
           signed integer image blurs to zeros and yields no edge; a uint8 image, a 3-channel integer image, or any
           integer image where torch has no integer convolution raises
@@ -239,6 +243,14 @@ def canny(
 
             _, edges = torch.while_loop(_changed, _step, (edges_old, edges))
         else:
+            if torch.jit.is_tracing():
+                warnings.warn(
+                    "Canny hysteresis under torch.jit tracing specializes the iteration count to the traced input. "
+                    "The traced model may produce incorrect results on other inputs. Use torch.export or the "
+                    "Dynamo ONNX exporter where supported, or disable hysteresis.",
+                    torch.jit.TracerWarning,
+                    stacklevel=2,
+                )
             while ((edges_old - edges).abs() != 0).any():
                 edges_old = edges
                 edges = _hysteresis_step(edges, hysteresis_kernels)

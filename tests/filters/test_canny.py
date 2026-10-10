@@ -568,6 +568,59 @@ class TestCanny(BaseTester):
             self.assert_close(magnitude, expected_magnitude)
             self.assert_close(edges, expected_edges)
 
+    @pytest.mark.device_agnostic
+    @pytest.mark.parametrize("hysteresis", [False, True])
+    def test_jit_trace_hysteresis_warning_5705(self, dtype, hysteresis):
+        if dtype not in (torch.float32, torch.float64):
+            pytest.skip("tracing is checked in float32 and float64")
+        model = Canny(0.2, 1.0, kernel_size=1, hysteresis=hysteresis).eval()
+        chain = self._long_weak_chain(dtype)
+        traced_on = chain.clone()
+        traced_on[..., 5:, 7] = 0.3
+        traced_on[..., 5:, 8:] = 0.5
+        with warnings.catch_warnings(record=True) as recorded:
+            warnings.simplefilter("always")
+            # One traced forward; compare both inputs explicitly below instead of retracing the example.
+            traced = torch.jit.trace(model, traced_on, check_trace=False)
+        canny_warnings = [w for w in recorded if str(w.message).startswith("Canny hysteresis under torch.jit tracing")]
+        assert len(canny_warnings) == int(hysteresis)
+        if hysteresis:
+            assert canny_warnings[0].category is torch.jit.TracerWarning
+        self.assert_close(traced(traced_on)[1], model(traced_on)[1], rtol=0, atol=0)
+        if hysteresis:
+            # This is a warning/documentation fix: the two traced rounds still truncate the 62-round chain.
+            eager_edges = model(chain)[1]
+            assert eager_edges[0, 0, :, 7].all()
+            assert int(eager_edges.sum()) == 64
+            assert int(traced(chain)[1].sum()) == 5
+        else:
+            self.assert_close(traced(chain)[1], model(chain)[1], rtol=0, atol=0)
+
+    @pytest.mark.device_agnostic
+    def test_eager_hysteresis_no_tracing_warning_5705(self, dtype):
+        if dtype not in (torch.float32, torch.float64):
+            pytest.skip("the warning control is checked in float32 and float64")
+        with warnings.catch_warnings(record=True) as recorded:
+            warnings.simplefilter("always")
+            _, edges = Canny(0.2, 1.0, kernel_size=1)(self._long_weak_chain(dtype))
+        assert not any(str(w.message).startswith("Canny hysteresis under torch.jit tracing") for w in recorded)
+        assert int(edges.sum()) == 64
+
+    @pytest.mark.device_agnostic
+    @pytest.mark.parametrize("hysteresis", [False, True])
+    def test_legacy_onnx_hysteresis_warning_5705(self, dtype, hysteresis):
+        if dtype != torch.float32:
+            pytest.skip("the exported graph is checked once, in float32")
+        pytest.importorskip("onnx")
+        model = Canny(kernel_size=1, hysteresis=hysteresis).eval()
+        with warnings.catch_warnings(record=True) as recorded:
+            warnings.simplefilter("always")
+            torch.onnx.export(model, torch.zeros(1, 1, 8, 8), io.BytesIO(), opset_version=17, dynamo=False)
+        canny_warnings = [w for w in recorded if str(w.message).startswith("Canny hysteresis under torch.jit tracing")]
+        assert len(canny_warnings) == int(hysteresis)
+        if hysteresis:
+            assert canny_warnings[0].category is torch.jit.TracerWarning
+
     @staticmethod
     def _long_weak_chain(dtype):
         # A ramped step 0 | 0.6 h | h across x = 6..8, so the ridge is x = 7 alone with no tie, whose height h is
@@ -592,7 +645,9 @@ class TestCanny(BaseTester):
         model = Canny(0.2, 1.0, kernel_size=1).eval()
         chain = self._long_weak_chain(dtype)
         traced_on = torch.rand(chain.shape, dtype=dtype, generator=torch.Generator().manual_seed(0))
-        exported = torch.export.export(model, (traced_on,)).module()
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", message="Canny hysteresis", category=torch.jit.TracerWarning)
+            exported = torch.export.export(model, (traced_on,)).module()
         for img in (chain, traced_on):
             magnitude, edges = exported(img)
             expected_magnitude, expected_edges = model(img)
@@ -618,6 +673,7 @@ class TestCanny(BaseTester):
         buffer = io.BytesIO()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
+            warnings.filterwarnings("error", message="Canny hysteresis", category=torch.jit.TracerWarning)
             torch.onnx.export(model, (traced_on,), dynamo=True, opset_version=18, verbose=False).save(buffer)
         session = ort.InferenceSession(buffer.getvalue(), providers=["CPUExecutionProvider"])
         name = session.get_inputs()[0].name
