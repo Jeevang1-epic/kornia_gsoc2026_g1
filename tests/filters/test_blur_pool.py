@@ -57,6 +57,54 @@ def _zero_padded_reference(x: torch.Tensor, k: int, s: int) -> torch.Tensor:
     return out
 
 
+@pytest.mark.parametrize("module_cls", [BlurPool2D, MaxBlurPool2D])
+class TestBlurPoolKernelState(BaseTester):
+    def test_forward_preserves_kernel(self, module_cls, device, dtype):
+        module = module_cls(3)
+        kernel = module.kernel.clone()
+        image = torch.arange(1, 65, device=device, dtype=dtype).reshape(1, 1, 8, 8)
+
+        module(image)
+
+        assert module.kernel.dtype == kernel.dtype
+        assert module.kernel.device == kernel.device
+        self.assert_close(module.kernel, kernel, rtol=0, atol=0)
+
+    def test_integer_call_preserves_kernel_5699(self, module_cls, device):
+        module = module_cls(3)
+        kernel = module.kernel.clone()
+        image = torch.arange(1, 65, device=device).to(torch.uint8).reshape(1, 1, 8, 8)
+
+        try:
+            module(image)
+        except RuntimeError as error:
+            # Some backends have no integer convolution/pooling. Even a failed call must preserve state.
+            if "not implemented" not in str(error):
+                raise
+
+        assert module.kernel.dtype == kernel.dtype
+        assert module.kernel.device == kernel.device
+        self.assert_close(module.kernel, kernel, rtol=0, atol=0)
+
+    def test_dtype_call_order_5699(self, module_cls, device, dtype):
+        module = module_cls(3)
+        image = torch.arange(1, 65, device=device, dtype=dtype).reshape(1, 1, 8, 8)
+        expected = module_cls(3)(image)
+        assert expected.abs().sum() > 0
+        self.assert_close(module(image), expected)
+
+        for _ in range(2):
+            # Assert state recovery, without prescribing the integer output semantics handled by #5669.
+            try:
+                module(image.to(torch.uint8))
+            except RuntimeError as error:
+                if "not implemented" not in str(error):
+                    raise
+            self.assert_close(module(image), expected)
+            self.assert_close(module(image.float()), module_cls(3)(image.float()))
+            self.assert_close(module(image), expected)
+
+
 class TestMaxBlurPool(BaseTester):
     @pytest.mark.parametrize("kernel_size", [3, (5, 5)])
     def test_smoke(self, kernel_size, device, dtype):

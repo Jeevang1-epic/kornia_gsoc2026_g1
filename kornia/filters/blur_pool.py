@@ -94,8 +94,8 @@ class BlurPool2D(nn.Module):
             the sizes given in the Shape section of the class. They depend only
             on the input size and ``self.stride``.
         """
-        self.kernel = torch.as_tensor(self.kernel, device=input.device, dtype=input.dtype)
-        return _blur_pool_by_kernel2d(input, self.kernel.repeat((input.shape[1], 1, 1, 1)), self.stride)
+        kernel = self.kernel.to(device=input.device, dtype=input.dtype)
+        return _blur_pool_by_kernel2d(input, kernel.repeat((input.shape[1], 1, 1, 1)), self.stride)
 
 
 class MaxBlurPool2D(nn.Module):
@@ -176,9 +176,9 @@ class MaxBlurPool2D(nn.Module):
             class. They depend only on the input size, ``self.max_pool_size``
             and ``self.stride``.
         """
-        self.kernel = torch.as_tensor(self.kernel, device=input.device, dtype=input.dtype)
+        kernel = self.kernel.to(device=input.device, dtype=input.dtype)
         return _max_blur_pool_by_kernel2d(
-            input, self.kernel.repeat((input.size(1), 1, 1, 1)), self.stride, self.max_pool_size
+            input, kernel.repeat((input.size(1), 1, 1, 1)), self.stride, self.max_pool_size
         )
 
 
